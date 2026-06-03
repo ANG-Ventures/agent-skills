@@ -107,16 +107,18 @@ Read the flags for the client's source IP:
 - **`SYN` then immediate `RST` from the server, or client data then server `FIN`** → server
   did engage — go back to the server-log -> cause map above.
 - **No packets at all from one specific client machine, yet `nc`/SSH to the same host works from
-  it, and OTHER hosts RDP fine from it** → a **local VPN / endpoint-security content filter on
-  that machine is swallowing the RDP connection** at the socket layer (macOS NEFilter providers:
-  NordVPN Threat Protection, Cloudflare WARP, Zscaler, Netskope, Little Snitch; Windows: similar
-  filter drivers). These drop specific app connections **even when the VPN shows "disconnected"**,
-  so packets never hit the wire. Tells on macOS: an abnormal pile of `utun` interfaces
-  (`ifconfig | grep -c '^utun'`) and a running helper (`pgrep -fl 'nord|warp|zscaler|vpn'`). If
-  MULTIPLE different RDP clients all send zero packets, it's a system-wide filter, not the app.
-  **Fix: quit the VPN/security app AND kill its helper** (e.g. `sudo pkill -f <helper>`), or
-  disable its threat-protection/content-filter feature and allow LAN. This is an extremely common
-  "RDP works from machine A but not machine B" root cause — check it before blaming the server.
+  it, and OTHER hosts RDP fine from it** → the **local VPN stack on that machine is intermittently
+  swallowing the RDP connection** (NordVPN, Tailscale, Cloudflare WARP, Zscaler, Little Snitch,
+  etc.). These can drop an app's flow at the socket/tunnel layer while plain `nc`/SSH still works,
+  so packets never reach the wire. If MULTIPLE different RDP clients all send zero packets, it's a
+  system-level VPN/filter, not the app. Tells on macOS: a pile of `utun` interfaces
+  (`ifconfig | grep -c '^utun'`), active VPNs in `scutil --nc list`, running helpers
+  (`pgrep -fl 'nord|tailscale|warp|zscaler|vpn'`). **Fix: bounce the VPN helper(s)** — e.g.
+  `sudo pkill -f -i nordvpn` (and/or restart Tailscale) — which rebuilds the tunnel/filter
+  plumbing; re-test after. ⚠️ It's often **stateful/intermittent** (works with the VPN running
+  one moment, not the next), so the reliable recovery is bouncing the helper, not trusting a
+  single toggle. This is an extremely common "RDP works from machine A but not machine B" root
+  cause — check it before blaming the server.
 
 (SSH "REMOTE HOST IDENTIFICATION HAS CHANGED" is a *separate* SSH-only issue — RDP has no
 host-key cache. Fix with `ssh-keygen -R <host>` after verifying the new host key is genuine,

@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.2
+- Correct the "local VPN swallows RDP" entry: it's stateful/intermittent (NordVPN AND Tailscale on the box), not a deterministic Threat-Protection NEFilter rule. Reliable recovery is bouncing the VPN helper(s), not a single toggle.
+
 ## 1.0.1
 - RDP diagnosis: document the "local VPN / endpoint-security content filter swallows RDP" root cause (NordVPN Threat Protection, Cloudflare WARP, etc.) — zero packets reach the server from one client while other clients/hosts work. Common "works from machine A not B" cause.
 
