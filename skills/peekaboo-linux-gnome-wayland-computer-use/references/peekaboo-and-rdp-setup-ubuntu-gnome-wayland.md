@@ -16,7 +16,7 @@ GNOME Shell 50, Wayland. Use this to replicate on any GNOME/Wayland host.
   `XDG_RUNTIME_DIR=/run/user/$(id -u)` and
   `DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus`. A bare detached SSH session is NOT in
   the graphical session — always export these (a native `systemd --user` service already has them).
-- NOPASSWD sudo (or interactive sudo) for the apt installs + the GDM restart.
+- The ability to run `sudo` (passwordless or interactive) for the apt installs + the GDM restart.
 
 ## ⚠️ The one disruptive step: reloading GNOME Shell
 On Wayland you **cannot** reload the Shell in place (`Alt+F2 r` is X11-only and unavailable over
