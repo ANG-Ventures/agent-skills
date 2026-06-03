@@ -106,6 +106,17 @@ Read the flags for the client's source IP:
     inherit); update Royal TSX (embedded FreeRDP connect-time bugs get fixed in newer builds).
 - **`SYN` then immediate `RST` from the server, or client data then server `FIN`** → server
   did engage — go back to the server-log -> cause map above.
+- **No packets at all from one specific client machine, yet `nc`/SSH to the same host works from
+  it, and OTHER hosts RDP fine from it** → a **local VPN / endpoint-security content filter on
+  that machine is swallowing the RDP connection** at the socket layer (macOS NEFilter providers:
+  NordVPN Threat Protection, Cloudflare WARP, Zscaler, Netskope, Little Snitch; Windows: similar
+  filter drivers). These drop specific app connections **even when the VPN shows "disconnected"**,
+  so packets never hit the wire. Tells on macOS: an abnormal pile of `utun` interfaces
+  (`ifconfig | grep -c '^utun'`) and a running helper (`pgrep -fl 'nord|warp|zscaler|vpn'`). If
+  MULTIPLE different RDP clients all send zero packets, it's a system-wide filter, not the app.
+  **Fix: quit the VPN/security app AND kill its helper** (e.g. `sudo pkill -f <helper>`), or
+  disable its threat-protection/content-filter feature and allow LAN. This is an extremely common
+  "RDP works from machine A but not machine B" root cause — check it before blaming the server.
 
 (SSH "REMOTE HOST IDENTIFICATION HAS CHANGED" is a *separate* SSH-only issue — RDP has no
 host-key cache. Fix with `ssh-keygen -R <host>` after verifying the new host key is genuine,

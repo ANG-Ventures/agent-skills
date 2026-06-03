@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.1
+- RDP diagnosis: document the "local VPN / endpoint-security content filter swallows RDP" root cause (NordVPN Threat Protection, Cloudflare WARP, etc.) — zero packets reach the server from one client while other clients/hosts work. Common "works from machine A not B" cause.
+
 ## 1.0.0
 - Initial public release.
 - Screenshot on GNOME 49+/Wayland via the `allow-gnome-screenshot` extension (scoped, no global unsafe_mode).
