@@ -1,0 +1,565 @@
+---
+name: systematic-debugging
+description: "4-phase root cause debugging: understand bugs before fixing."
+version: 1.1.0
+author: Hermes Agent (adapted from obra/superpowers)
+license: MIT
+platforms: [linux, macos, windows]
+metadata:
+  hermes:
+    tags: [debugging, troubleshooting, problem-solving, root-cause, investigation]
+    related_skills: [test-driven-development, writing-plans, subagent-driven-development]
+---
+
+# Systematic Debugging
+
+## Overview
+
+Random fixes waste time and create new bugs. Quick patches mask underlying issues.
+
+**Core principle:** ALWAYS find root cause before attempting fixes. Symptom fixes are failure.
+
+**Violating the letter of this process is violating the spirit of debugging.**
+
+## The Iron Law
+
+```
+NO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST
+```
+
+If you haven't completed Phase 1, you cannot propose fixes.
+
+## When to Use
+
+Use for ANY technical issue:
+- Test failures
+- Bugs in production
+- Unexpected behavior
+- Performance problems
+- Build failures
+- Integration issues
+
+**Use this ESPECIALLY when:**
+- Under time pressure (emergencies make guessing tempting)
+- "Just one quick fix" seems obvious
+- You've already tried multiple fixes
+- Previous fix didn't work
+- You don't fully understand the issue
+
+**Don't skip when:**
+- Issue seems simple (simple bugs have root causes too)
+- You're in a hurry (rushing guarantees rework)
+- Someone wants it fixed NOW (systematic is faster than thrashing)
+
+## The Four Phases
+
+You MUST complete each phase before proceeding to the next.
+
+---
+
+## Phase 0: Read the Prior Investigation (repos with history)
+
+**BEFORE Phase 1, in any repo that has existing specs/docs:** the "obvious next fix"
+you'd derive from raw forensics/logs is often **already shipped or deliberately
+declined** by prior sessions. Find the status board (`AGENTS.md`, `SPEC-*-CONSOLIDATED.md`,
+fix-status table) and read it as source of truth before proposing anything; `grep src/`
+for the mechanism before assuming it's unbuilt; and confirm what's actually RUNNING
+(daemon start time vs file mtime — stale long-running processes silently run old code).
+A data-gated fix can be **MEASURED → DECLINED** (a valid outcome, not a failure). When
+you spot the duplication trap or a missing status board, leave an anti-duplication
+artifact (AGENTS.md + status table) so the next agent doesn't repeat it. Full playbook,
+the Fix B measure-then-decline example, and the worktree subagent boundary:
+`references/read-prior-investigation-before-fixing.md`.
+
+## Phase 1: Root Cause Investigation
+
+**BEFORE attempting ANY fix:**
+
+### 1. Read Error Messages Carefully
+
+- Don't skip past errors or warnings
+- They often contain the exact solution
+- Read stack traces completely
+- Note line numbers, file paths, error codes
+- **Classify on the FULL message, not the first matching keyword.** When bucketing many failures by a substring, read a representative sample of the *complete* strings first — a word like "unavailable" can appear inside a recoverable rate-limit error. When labeling failures transient-vs-terminal, transient/recoverable wins ties (mislabeling transient as terminal abandons recoverable work). And a subagent/batch `completed` status is not proof of work — verify `tool_trace`/output/row-counts. Worked examples + the "check the skill's documented pitfalls before inventing a novel cause" rule: `references/classify-on-full-evidence-not-first-keyword.md`.
+
+**Action:** Use `read_file` on the relevant source files. Use `search_files` to find the error string in the codebase.
+
+### 2. Reproduce Consistently
+
+- Can you trigger it reliably?
+- What are the exact steps?
+- Does it happen every time?
+- If not reproducible → gather more data, don't guess
+
+**Action:** Use the `terminal` tool to run the failing test or trigger the bug:
+
+```bash
+# Run specific failing test
+pytest tests/test_module.py::test_name -v
+
+# Run with verbose output
+pytest tests/test_module.py -v --tb=long
+```
+
+### 3. Check Recent Changes
+
+- What changed that could cause this?
+- Git diff, recent commits
+- New dependencies, config changes
+
+**Action:**
+
+```bash
+# Recent commits
+git log --oneline -10
+
+# Uncommitted changes
+git diff
+
+# Changes in specific file
+git log -p --follow src/problematic_file.py | head -100
+```
+
+### 4. Gather Evidence in Multi-Component Systems
+
+**WHEN system has multiple components (API → service → database, CI → build → deploy):**
+
+**BEFORE proposing fixes, add diagnostic instrumentation:**
+
+For EACH component boundary:
+- Log what data enters the component
+- Log what data exits the component
+- Verify environment/config propagation
+- Check state at each layer
+
+Run once to gather evidence showing WHERE it breaks.
+THEN analyze evidence to identify the failing component.
+THEN investigate that specific component.
+
+**Special case: LLM-in-the-loop systems.** When the symptom is "the model behaved unexpectedly" (invalid tool call, refused, hallucinated, wrong format after a config change), source-code reasoning misleads worst. The model is not reading your source code — it is responding to whatever bytes actually reached the model API. Reasoning about which transform fired is a hypothesis, not a finding, until you see the bytes.
+
+**Mandatory sub-step for LLM systems:** capture the exact request bytes the model received and the exact response bytes it returned before forming a root-cause hypothesis. ~50 lines of opt-in body-capture instrumentation can resolve in minutes what days of source-code reasoning miss. See `references/instrument-before-guessing-when-model-is-symptom.md` for the minimum useful capture pattern, a real-world example (2026-05-12), and anti-patterns this prevents.
+
+**The instrumentation outlasts the bug.** Once you've built byte-capture for one investigation, gate it behind a config flag and leave it in. The next diagnostic question in the same system gets answered in minutes instead of rebuilt from scratch. In the 2026-05-12 case, the same `captureBodies` feature later revealed a second class of bug (casing-collision in a transform whose test suite only used homogeneous lowercase fixtures) — without it, that bug would have shipped to production for the same reason the first one did.
+
+**When the binary is proprietary and the question is "what exact request does it make?"** (auth, headers, scope, endpoint — e.g. "is calling this undocumented endpoint allowed / are our reimplemented headers right?"), terminate its TLS and read the decrypted request rather than reasoning about its source. Escalation ladder: plain logging proxy → CONNECT-logger (names the real host when the binary ignores `*_BASE_URL`) → TLS-MITM with your own CA trusted via the runtime's CA env. Then route YOUR client through the same MITM and diff. Watch for the chat redaction layer rewriting identifier tokens in your output — trust the raw log bytes. Shred the CA private key after. Full recipe (openssl CA, Python stdlib MITM, tmux TUI-driving, the redaction-rewrite trap): `references/prove-wire-call-with-tls-mitm.md`.
+
+For "ran cleanly, did nothing" bugs — injected DOM scripts, MutationObservers, middleware, event listeners, intercepted fetch handlers where lifecycle telemetry (`attached`, `registered`, `subscribed`) looks healthy but the user-visible symptom persists — read `references/log-effect-not-lifecycle.md`. It captures the failure pattern, a 2026-05-14 HA-sidebar worked example (~90 minutes lost to wrong diagnostic because `[ScriptName] observer attached` was treated as proof of correctness), the minimum-useful-logs template (candidates / matched / mutated counts), and the class invariant: **telemetry at the layer of effect, not the layer of installation.**
+
+For Windows display/GPU black screens where the machine remains reachable over SSH/RDP, use the read-only probe in `references/windows-display-link-debugging.md` before changing settings. It covers WMI monitor connection state, `nvidia-smi` attached-vs-active interpretation, `nvlddmkm` Event ID 14 capture, and high-refresh/DSC/HDR/VRR isolation order.
+
+For active DisplayPort→HDMI 2.1 adapters where native DisplayPort works but fixed high refresh, VRR/G-SYNC/DRR, or color/black-level behavior changes through the adapter, use `references/active-dp-hdmi-adapter-vrr-debugging.md`. It covers adapter firmware/rollback handling, post-flash reconnect/power-cycle, RGB Full vs Limited range mismatches, Windows VRR settings, and Linux xrandr/nvidia-settings probes.
+
+For active DisplayPort→HDMI 2.1 adapter issues — DRR/VRR/G-Sync missing despite high fixed refresh, washed/lighter colors at one refresh but not another, or adapter firmware questions — use `references/windows-dp-hdmi-adapter-vrr-color.md`. It captures the Cable Matters 102101 VRR firmware/rollback flow, Club 3D CAC-1088 VRR caveats, and the RGB Full vs Limited diagnostic ladder.
+
+For Ubuntu/GNOME Wayland high-refresh display or HDMI/eARC audio issues, use `references/ubuntu-gnome-wayland-display-audio-debugging.md` and the read-only helper `scripts/ubuntu-wayland-display-summary.py`. This covers Mutter DisplayConfig DBus, DRM sysfs/EDID, PipeWire/WirePlumber/ALSA ELD probes, and the 4K240-vs-4K100/120 DSC/link-validation diagnostic ladder.
+
+For Windows 11 DRR/VRR/G-SYNC failures through active DisplayPort-to-HDMI adapters, check `references/displayport-hdmi-vrr-adapters.md` before blaming the GPU. High fixed refresh support does not imply VRR exposure; adapter firmware and rollback paths matter.
+
+### 4b. Re-derive a Handed-Off Diagnosis Before Patching
+
+**WHEN you're given someone else's root-cause writeup (another agent, a teammate,
+a past session, or your own earlier reasoning) plus an approved fix and asked to
+"just implement it":** the diagnosis is a HYPOTHESIS, not a finding. Re-derive it
+from the primary evidence (the actual logs/metrics it was built from) before
+touching code. Grep the timestamp window yourself, match the failure signal
+(error type, timing gaps, token counts) to the claimed mechanism, read the code
+paths the fix would touch, and check for documented prior rationale on any
+threshold you'd change. If the mechanism turns out wrong, STOP and re-present —
+even when the fix was already approved, because approval was granted against the
+wrong model of the bug. Worked example (Hermes Codex non-streaming hang: TTFB was
+*not* streaming-only; it just lost a race to a shorter 90s stale timer) and the
+full 5-step procedure: `references/verify-handed-off-diagnosis-against-logs.md`.
+
+### 5. Static-site URL/path-dependent asset bugs
+
+**WHEN a static page works at `/route` but breaks at `/route/` (or only under nested paths):** treat asset resolution as the data flow. Reproduce both URL shapes, inspect the returned HTML, and verify the browser-resolved resource URLs — not just that the page returns 200. Relative asset references like `src="logo.png"` or `url('bg.jpg')` resolve differently under `/route/` (`/route/logo.png`) and can be masked by catch-all/fallback routing that returns HTML with status 200 instead of the image.
+
+Minimum evidence before fixing:
+- Fetch both page URLs and compare asset references in the HTML/CSS.
+- Fetch the resolved asset URLs from the broken path and verify `Content-Type` plus binary signature/size; a 200 `text/html` fallback is still a broken image.
+- Use browser/resource inspection when available to confirm the actual loaded `img`, CSS background, and favicon URLs.
+
+Preferred fix:
+- Make site-root assets root-relative (`/logo.png`, `/bg.jpg`, `/favicon.svg`) or absolute, then redeploy.
+- Verify both `/route` and `/route/`, plus direct asset endpoints and favicon endpoints.
+
+### 5b. A count is not a diagnosis; an enriched field is not an indexed field
+
+**WHEN a batch job reports `attempted=N succeeded=M` (M<N) and you're about to attribute the
+gap to a failure cause** ("the missing items are expired/unreachable/errored"): STOP and
+confirm what the counters actually mean before asserting. The "succeeded" counter often ticks
+only on a *positive result*, not on *absence of error* — so the gap can be benign empty
+results, not failures. If the loop has no per-item `try/catch` and the run completed, then
+*nothing errored* (a real error would have aborted the whole run). Read the loop, pull a few
+gap items from the DB, and probe one live before claiming a cause. Re-running non-failures
+wastes spend and yields the identical result.
+
+**WHEN you add a derived/enrichment field and assume it's searchable:** trace it to EVERY
+consumer, not just the obvious one. Hybrid-search systems have independent text-assembly paths
+(FTS/keyword builder, embedding-input builder, export/render, ranker); a field written but read
+by only a subset is a silently half-wired feature (e.g. media text in FTS but never in the
+vector index). Prove the fix behaviorally with a query whose only possible match is the new
+field. Both traps + the cheap checks + the behavioral proof: `references/count-gap-and-enriched-not-indexed.md`.
+
+### 5c. A cycling/transient state defeats a "held for > N seconds" detector — sample the STEADY signal, not the instantaneous state
+
+**WHEN you're building a detector/watchdog/health-check whose condition is a state held over time** ("if X has been in state S for > N seconds → act"): first confirm the failing system actually *sustains* that state. A surprising number of stuck/wedged systems **cycle rapidly between two states** (`S → idle → S → idle …` every few seconds) instead of holding one — so the instantaneous state you sample is sometimes S and sometimes the other phase, and a "held in S for > N s" gate **silently misses the very failure it was written to catch** (every sample reads a short in-state duration and classifies it OK). This bit a real watchdog (2026-06-12): the spec assumed a satellite stuck in `listening` would *hold* `listening`, but the real wedge cycled `listening↔idle` every ~15.8s, so the spec-derived `state==listening for >90s` gate would have completely missed it.
+
+The fix is to **key the detector on a steady/aggregate signal that the cycle *produces continuously*, not on the transient state itself.** In that case the reliable discriminator was the *cadence* of empty STT runs in the logs (≥3 `transcript='' audio_s=15.00` in 60s) — present on every loop iteration regardless of which phase you sampled — with the instantaneous state used only as a coarse sanity check, never the gate. General rule: a duration-of-state condition is only valid if you've **empirically confirmed the state is monotonically held, not flapping** — pull two state reads a few seconds apart (or `journalctl`/log over a window) and look for cycling before you trust "it's been in S for a while." And critically: this is exactly the class of detection bug that **unit tests written from the same wrong spec will ALL pass** — only a live run against the real flapping system exposes it (instrument before trusting the spec's state model; the live test caught 3 such bugs the green unit suite couldn't).
+
+### 5d. A bursty long-running job is NOT wedged just because an instantaneous sample reads idle — measure the STEADY-STATE rate over a window before you kill it
+
+**WHEN a long-running, throughput-style job (batch ingest, crawler, transcription
+pipeline, queue drainer) looks stalled** — `0% CPU`, no active child procs, a
+progress counter that hasn't moved in your last few snapshots — STOP before you
+restart/kill it. Throughput jobs are **bursty by construction**: politeness sleeps,
+per-item rate limits, slow remote steps (a ~7s JS-challenge solve, a remote ASR
+round-trip), and acquire-ahead buffering mean that at any given *instant* most
+workers are sleeping and local CPU reads ~0. An instantaneous `ps`/`%CPU`/one-shot
+counter read catches the trough and lies. This bit a real session (2026-06-12): a
+healthy YouTube-transcription ingest that had climbed 3,335→4,989 overnight was
+misread as "wedged" from a string of 0%-CPU / flat-count snapshots, and got
+**SIGKILL-thrashed ~8 times** chasing a phantom — every kill (rc=137/143) then
+*became* the flat-count evidence that "confirmed" the wedge. Classic self-inflicted
+feedback loop.
+
+**Before concluding a long-running job is stuck:**
+- **Measure the rate over a real window, not a point.** Sample the durable progress
+  signal (manifest done-count, rows committed, files written) at `t=0` and again
+  after a window sized to the job's *known* cadence — if the historical rate is
+  ~110/hr (~1.8/min), a 2–4 min "+0" proves nothing; you need 5–15 min. Read the
+  job's own historical tick deltas (its log) to learn the expected rate first.
+- **Watch a churning signal across several samples,** not one: a staging-dir count,
+  child-proc count, or active-connection count taken 3× over 30–60s. `2→0→3` is
+  *alive and cycling*, not dead. One `0` is just the trough.
+- **Distinguish "parked on a lock" (real wedge) from "sleeping on a rate limiter"
+  (normal).** `sample <pid>` (macOS) / `py-spy dump` / `/proc/<pid>/stack`: workers
+  in `time_sleep`/`nanosleep` are throttled-and-fine; the main thread on
+  `acquire_lock` *with no worker ever progressing across a full window* is the wedge.
+  The stack alone isn't enough — pair it with the windowed rate measurement.
+- **A frozen secondary artifact may be stale, not live.** A telemetry/log file with
+  an old mtime can read like "nothing's happening since 08:51" when it's simply not
+  the file the current run writes. Check mtime and whether THIS process owns it
+  before treating its contents as live evidence.
+- **Verify each component in isolation before blaming orchestration.** Downloads
+  land fine (run one by hand), all backends respond fine (curl the real endpoint
+  with a real input), upstream passes a health probe — if every piece works
+  standalone, "it's all broken" is wrong; you're misreading the aggregate.
+
+**And the meta-rule: do not thrash a system the user depends on.** Repeated
+`pkill -9` + restart on a *resumable* job is not free — it destroys in-flight work,
+resets governors/cooldowns, and manufactures the very flat-progress symptom you're
+chasing. If your hypothesis is "wedged," prove it with a windowed measurement FIRST;
+if you've already killed it 2+ times and each kill is your only new "evidence," you
+are the bug. Restore the last-known-good config, let it run **uninterrupted** for a
+window sized to its real cadence, and read the deltas before touching it again.
+
+### 6. Trace Data Flow
+
+**WHEN error is deep in the call stack:**
+
+- Where does the bad value originate?
+- What called this function with the bad value?
+- Keep tracing upstream until you find the source
+- Fix at the source, not at the symptom
+
+**Action:** Use `search_files` to trace references:
+
+```python
+# Find where the function is called
+search_files("function_name(", path="src/", file_glob="*.py")
+
+# Find where the variable is set
+search_files("variable_name\\s*=", path="src/", file_glob="*.py")
+```
+
+### 6. Windows display/GPU black-screen debugging
+
+**WHEN a Windows workstation is reachable remotely but the local monitor black-screens after refresh/HDR/VRR/display-input changes:** do read-only instrumentation first, then change one display variable at a time only after explicit user authorization. Use `references/windows-display-gpu-black-screen.md` for the probe sequence: Win32 video controllers, PnP monitors, WMI monitor connection params, `nvidia-smi`, hot-window event logs, `nvlddmkm` Event ID 14 properties, safe-off VRR/AutoHDR registry toggles, registry backups, and Wake-on-LAN recovery.
+
+### 7. Distinguish provider failure from emulation drift
+
+**WHEN debugging a proxy/bridge that emulates a real CLI/SDK:** separate these failure classes before fixing code:
+
+1. **Quota/provider state** — e.g. usage-limit errors or subscription exhaustion.
+2. **Credential-source drift** — real CLI succeeds because it refreshed Keychain/secret-store credentials while the proxy reads a stale file.
+3. **Request transform drift** — fork output differs from upstream or from known-good fixtures.
+4. **Real-client baseline drift** — CLI/SDK version changed headers, beta list, `stream`, user-agent, billing metadata, etc.
+
+Use mock/offline instrumentation first:
+
+- Compare fork vs upstream transform output on realistic fixtures.
+- Capture the real CLI/SDK request against a local mock endpoint, redacting credentials.
+- Normalize volatile values (`device_id`, `session_id`, UUIDs, billing hash suffixes) before diffing.
+- Only run live probes after the offline diffs are understood.
+
+For live probes, vary one wire-shape dimension at a time (`stream`, `accept`, beta list, token source, model). Prefer the cheapest model first; make expensive model probes opt-in.
+
+When debugging proxy/bridge live-provider failures, also check the packaged reference: `references/proxy-bridge-live-provider-quirks.md`. It captures recurring wire-shape pitfalls: stream/Accept mismatches, hop-by-hop header forwarding, Anthropic `cache_control` placement, and deterministic live cache-hit probes.
+
+For the specific case of `~/claude-api-proxy/` + Hermes routing failures, follow the symptom-class-specific workflow in `references/claude-api-proxy-live-diagnosis.md`. It documents: the proxy's built-in `captureBodies` flag and capture-dir layout, the mandatory harness-vs-curl two-probe split, the failure-class checklist (substitution / tool rename / reverse-map / system-prompt expansion / multi-turn corruption / 4xx / header injection / JSON string-boundary corruption), and the critical pitfall that a passing minimal probe or transient `/health` response is NOT evidence of proxy health unless the probe exercised the suspected failure surface and logs are clean after real harness traffic.
+
+For `claude-api-proxy` credential-source drift where Claude Code is logged in but Forge/OpenClaw/Hermes fails with `ENOENT: ... ~/.claude/.credentials.json`, read `references/claude-api-proxy-keychain-missing-file.md`. Newer Claude Code may store the live OAuth blob in macOS Keychain with no credentials file; request-time token loading must treat missing/empty files as absent and still fall back to Keychain, not hard-fail before fallback.
+
+**When the system under debugging transforms its own observation channel** (a proxy that substitutes strings in BOTH directions of the wire, including the bytes of your own test scripts, debug prompts, and assertion messages), read `references/self-transforming-systems-debugging.md`. It covers: dynamic string construction (`String.fromCharCode`) to keep sensitive literals out of source code that travels through the transform, base64/hex/file-size side channels for byte-level inspection, the straddling-needle bug class in retain-tail buffers (with the back-off-splitAt fix pattern), and a worked example from `claude-api-proxy` v2.9.2.
+
+**When you've shipped multiple non-trivial fixes to a long-running wire-transform sidecar and want a standing adversarial probe per documented bug class**, read `references/adversarial-gauntlet-for-wire-transform-sidecars.md`. It covers: the four-field anatomy of a gauntlet challenge (what / code paths / fix / regression test), single-vs-stacked-vs-cocktail strategy, the instrumentation prerequisites (body capture, structured `/health` error counters, restart counters, alert rate-limit signatures), the after-action checklist, and the critical "dormant defensive code" honesty rule for distinguishing actively-verified vs unreachable code paths. Worked example: `~/claude-api-proxy/GAUNTLET.md` (7 challenges, v2.10.4, May 2026).
+
+### Honest verification of a shipped fix
+
+When the user asks "did the fix work?" or "is it working now?", the bar is not "one `/health` probe returned 200." The bar is:
+
+1. **Liveness check that distinguishes restart from steady state.** Look at `launchctl print` (or systemctl, or container restart count) for `runs = N` and the time the PID has been alive. A `/health` 200 between launchd restarts of a crash-looping process is a false positive — exactly the failure mode that embarrassed the 2026-05-14 session.
+2. **Real-traffic evidence, not synthetic.** Captures in `/tmp/proxy-capture/` (or equivalent) showing the user's actual requests being served successfully, with `requestsServed` incrementing while the user is active.
+3. **Log cleanliness after the latest version banner.** Grep for crash signatures (`SyntaxError`, `uncaughtException`, the original error string, etc.) in only the log segment after the version-banner marker. Old crash entries from the pre-fix process are not evidence of new failure.
+4. **Honest reproduction or honest absence.** If you tried to build a synthetic repro of the bug and it does not reproduce on the pre-fix version, say so. You proved a *plausible* corruption path, not the exact prod trigger. The right next move is to extract the actual crashing payload from the capture dir or log and feed it through on the pre-fix version. That is a deterministic regression. Stop short of that and your "fix shipped" claim rests on real-traffic absence-of-crash for a few minutes, not on a regression test. This is OK when the user is unblocked, but be explicit about the gap so the regression test doesn't quietly never get written.
+
+Code path: every shipped fix becomes a `test/parity/vX.Y.Z-*.test.js` regression file. If you cannot point to one for this fix, the fix is not done yet — it is staged.
+
+### Two false-success traps that only behavioral testing catches
+
+These bit a real session (2026-06) and both were caught ONLY because the verification probed *behavior*, not a tool's success claim or a self-supplied render. Internalize both:
+
+1. **A patch/edit tool can report `success: true` while silently changing nothing.** A multi-block `patch` with `"""`-quoted Python docstrings in the old/new strings matched zero bytes (escaping mismatch) yet returned success; the file was unchanged. The next dry-run "passed" — because it was running the OLD code's output, which happened to look plausible. **Never trust an edit tool's success field. After any edit, re-read the changed region (`grep` for a token you just added) and confirm the new bytes are physically present before running anything downstream.** If a later test behaves like the edit didn't land, suspect a silent no-op patch first.
+
+2. **Synthetic input rendering correctly is NOT empirical proof.** "I proved the new log field works" — by calling the format string in-process with a value I supplied myself, which trivially echoed it back. That proved the *format*, not that the live system *produces* that value on the real path. The production path never populated the field as assumed. **A self-constructed fixture that round-trips tells you the code can format/parse that shape; it tells you nothing about whether the real upstream emits it.** To prove a field/value is real, grep the LIVE artifact (log, DB, capture dir) for an actual production occurrence — zero hits means your assumption is wrong regardless of how clean the synthetic test is. This is the same class as the `/health`-200-between-restarts false positive: synthetic/steady-state evidence masquerading as proof of the real path.
+
+### Phase 1 Completion Checklist
+
+- [ ] Error messages fully read and understood
+- [ ] Issue reproduced consistently
+- [ ] Recent changes identified and reviewed
+- [ ] Evidence gathered (logs, state, data flow)
+- [ ] Problem isolated to specific component/code
+- [ ] Root cause hypothesis formed
+
+**STOP:** Do not proceed to Phase 2 until you understand WHY it's happening.
+
+---
+
+## Phase 2: Pattern Analysis
+
+**Find the pattern before fixing:**
+
+### 1. Find Working Examples
+
+- Locate similar working code in the same codebase
+- What works that's similar to what's broken?
+
+**Action:** Use `search_files` to find comparable patterns:
+
+```python
+search_files("similar_pattern", path="src/", file_glob="*.py")
+```
+
+### 2. Compare Against References
+
+- If implementing a pattern, read the reference implementation COMPLETELY
+- Don't skim — read every line
+- Understand the pattern fully before applying
+
+### 3. Identify Differences
+
+- What's different between working and broken?
+- List every difference, however small
+- Don't assume "that can't matter"
+
+### 4. Understand Dependencies
+
+- What other components does this need?
+- What settings, config, environment?
+- What assumptions does it make?
+
+---
+
+## Phase 3: Hypothesis and Testing
+
+**Scientific method:**
+
+### 1. Form a Single Hypothesis
+
+- State clearly: "I think X is the root cause because Y"
+- Write it down
+- Be specific, not vague
+
+### 2. Test Minimally
+
+- Make the SMALLEST possible change to test the hypothesis
+- One variable at a time
+- Don't fix multiple things at once
+
+### 3. Verify Before Continuing
+
+- Did it work? → Phase 4
+- Didn't work? → Form NEW hypothesis
+- DON'T add more fixes on top
+
+### 4. When You Don't Know
+
+- Say "I don't understand X"
+- Don't pretend to know
+- Ask the user for help
+- Research more
+
+---
+
+## Phase 4: Implementation
+
+**Fix the root cause, not the symptom:**
+
+### 1. Create Failing Test Case
+
+- Simplest possible reproduction
+- Automated test if possible
+- MUST have before fixing
+- Use the `test-driven-development` skill
+
+**For transform functions (wrap/unwrap, encode/decode, escape/unescape, casing-preserving operations):** the regression test MUST exercise input diversity, not just one fixture. A casing-collision bug in this session shipped to production because the test suite only used lowercase inputs (`'calculator'`, `'bash'`), so a lowercase-first unwrap rule looked correct. Production used PascalCase tools (`'Glob'`, `'Bash'`) and the round-trip silently corrupted them. Minimum fixture set for a casing/format-preserving transform: lowercase-first, uppercase-first, snake_case, mixed-case, empty, single-char, already-transformed (idempotency), plus a `transform_inverse(transform(x)) === x` identity check across all of them.
+
+### 2. Implement Single Fix
+
+- Address the root cause identified
+- ONE change at a time
+- No "while I'm here" improvements
+- No bundled refactoring
+
+### 3. Verify Fix
+
+```bash
+# Run the specific regression test
+pytest tests/test_module.py::test_regression -v
+
+# Run full suite — no regressions
+pytest tests/ -q
+```
+
+### 4. If Fix Doesn't Work — The Rule of Three
+
+- **STOP.**
+- Count: How many fixes have you tried?
+- If < 3: Return to Phase 1, re-analyze with new information
+- **If ≥ 3: STOP and question the architecture (step 5 below)**
+- DON'T attempt Fix #4 without architectural discussion
+
+### 5. If 3+ Fixes Failed: Question Architecture
+
+**Pattern indicating an architectural problem:**
+- Each fix reveals new shared state/coupling in a different place
+- Fixes require "massive refactoring" to implement
+- Each fix creates new symptoms elsewhere
+
+**STOP and question fundamentals:**
+- Is this pattern fundamentally sound?
+- Are we "sticking with it through sheer inertia"?
+- Should we refactor the architecture vs. continue fixing symptoms?
+
+**Discuss with the user before attempting more fixes.**
+
+This is NOT a failed hypothesis — this is a wrong architecture.
+
+---
+
+## Red Flags — STOP and Follow Process
+
+If you catch yourself thinking:
+- "Quick fix for now, investigate later"
+- "Just try changing X and see if it works"
+- "Add multiple changes, run tests"
+- "Skip the test, I'll manually verify"
+- "It's probably X, let me fix that"
+- "I don't fully understand but this might work"
+- "Pattern says X but I'll adapt it differently"
+- "Here are the main problems: [lists fixes without investigation]"
+- Proposing solutions before tracing data flow
+- **"One more fix attempt" (when already tried 2+)**
+- **Each fix reveals a new problem in a different place**
+- **You are shipping a third revision of a fix for the same symptom, each with its own architecture story.** For LLM-in-the-loop systems this is the tell-tale sign that the original hypothesis was wrong and every "improvement" since has been refining the wrong model of the bug. See `references/instrument-before-guessing-when-model-is-symptom.md`.
+- **Lifecycle telemetry looks healthy but symptom persists.** `[ScriptName] attached`, `observer registered`, `middleware loaded`, `subscribed to events` — none of these prove the work loop ever did work. If your only telemetry is at the install layer, you cannot distinguish "selector matched zero elements" from "script failed to load," and you will burn hours on the wrong hypothesis. See `references/log-effect-not-lifecycle.md`.
+- **Remote Windows display debugging:** when a Windows machine is alive over SSH/RDP but the physical monitor black-screens/blinks after GPU, cable, adapter, or refresh-rate changes, separate host health from display-path health before changing drivers. Probe video controllers, PnP monitors, WMI monitor connection params, `nvidia-smi`, and recent display/PnP events; then test one cable path at 4K60 SDR before adding HDR/VRR/high refresh. See `references/windows-remote-display-black-screen.md`.
+- **DP-to-HDMI DRR/VRR debugging:** if native DisplayPort supports DRR/VRR but an active DP-to-HDMI adapter does not, do not blame the GPU first. Check adapter firmware/bridge-chip support and whether Windows/NVIDIA sees VRR capability at all. See `references/displayport-hdmi-vrr-adapters.md`.
+
+- **You were handed a root-cause writeup + an approved fix and are about to "just implement it."** A handed-off diagnosis (from another agent, a teammate, a past session, or your own earlier reasoning) is a hypothesis. If you haven't re-derived it from the raw logs/metrics it was built on, you don't know the mechanism — and the approved fix may be tuned against the wrong one. Three even 90s timing gaps mean a 90s timer, not the 120s watchdog the writeup blamed. See `references/verify-handed-off-diagnosis-against-logs.md`.
+
+- **You're about to explain an `attempted=N / succeeded=M` gap as failures** (or any "X out of Y didn't work") from the number alone. The "succeeded" counter may only tick on a non-empty result, not on absence-of-error — the gap can be benign empties. A loop with no per-item catch that ran to completion means *nothing errored*. Read the loop and inspect the actual gap items before asserting a cause. See `references/count-gap-and-enriched-not-indexed.md`.
+- **You added an enrichment/derived field and assumed it's searchable** without tracing it to every consumer (FTS builder, embedding-input builder, export, ranker). A field in one search leg but not the others is a silent half-wired feature. See `references/count-gap-and-enriched-not-indexed.md`.
+
+- **You're about to restart/`kill` a long-running throughput job because it "looks stuck"** (0% CPU, no active children, flat counter over a couple of snapshots). Bursty jobs (ingest, crawler, transcription, queue drainer) read idle at the instant you sample the trough. Measure the durable progress signal over a window sized to the job's *known* cadence (5–15 min, not 2–4) before concluding wedged — and if you've already killed it 2+ times and each kill is your only new "evidence" of a stall, you manufactured the symptom. See section 5d. **ALL of these mean: STOP.**
+
+**ALL of these mean: STOP. Return to Phase 1.**
+
+**If 3+ fixes failed:** Question the architecture (Phase 4 step 5).
+
+## Common Rationalizations
+
+| Excuse | Reality |
+|--------|---------|
+| "Issue is simple, don't need process" | Simple issues have root causes too. Process is fast for simple bugs. |
+| "Emergency, no time for process" | Systematic debugging is FASTER than guess-and-check thrashing. |
+| "Just try this first, then investigate" | First fix sets the pattern. Do it right from the start. |
+| "I'll write test after confirming fix works" | Untested fixes don't stick. Test first proves it. |
+| "Multiple fixes at once saves time" | Can't isolate what worked. Causes new bugs. |
+| "Reference too long, I'll adapt the pattern" | Partial understanding guarantees bugs. Read it completely. |
+| "I see the problem, let me fix it" | Seeing symptoms ≠ understanding root cause. |
+| "One more fix attempt" (after 2+ failures) | 3+ failures = architectural problem. Question the pattern, don't fix again. |
+
+## Quick Reference
+
+| Phase | Key Activities | Success Criteria |
+|-------|---------------|------------------|
+| **1. Root Cause** | Read errors, reproduce, check changes, gather evidence, trace data flow | Understand WHAT and WHY |
+| **2. Pattern** | Find working examples, compare, identify differences | Know what's different |
+| **3. Hypothesis** | Form theory, test minimally, one variable at a time | Confirmed or new hypothesis |
+| **4. Implementation** | Create regression test, fix root cause, verify | Bug resolved, all tests pass |
+
+## Hermes Agent Integration
+
+### Investigation Tools
+
+Use these Hermes tools during Phase 1:
+
+- **`search_files`** — Find error strings, trace function calls, locate patterns
+- **`read_file`** — Read source code with line numbers for precise analysis
+- **`terminal`** — Run tests, check git history, reproduce bugs
+- **`web_search`/`web_extract`** — Research error messages, library docs
+
+### With delegate_task
+
+For complex multi-component debugging, dispatch investigation subagents:
+
+```python
+delegate_task(
+    goal="Investigate why [specific test/behavior] fails",
+    context="""
+    Follow systematic-debugging skill:
+    1. Read the error message carefully
+    2. Reproduce the issue
+    3. Trace the data flow to find root cause
+    4. Report findings — do NOT fix yet
+
+    Error: [paste full error]
+    File: [path to failing code]
+    Test command: [exact command]
+    """,
+    toolsets=['terminal', 'file']
+)
+```
+
+### With test-driven-development
+
+When fixing bugs:
+1. Write a test that reproduces the bug (RED)
+2. Debug systematically to find root cause
+3. Fix the root cause (GREEN)
+4. The test proves the fix and prevents regression
+
+## Real-World Impact
+
+From debugging sessions:
+- Systematic approach: 15-30 minutes to fix
+- Random fixes approach: 2-3 hours of thrashing
+- First-time fix rate: 95% vs 40%
+- New bugs introduced: Near zero vs common
+
+**No shortcuts. No guessing. Systematic always wins.**
